@@ -1,0 +1,29 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python launcher tests
+        run: timeout 30s python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Shell syntax
+        run: |
+          bash -n scripts/build-viewer.sh
+          bash -n scripts/install-integration.sh
+      - name: Install Lua
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes lua5.4
+      - name: Lua syntax
+        run: |
+          lua5.4 tests/check_lua_syntax.lua neovim/lua/terminal_pdf/init.lua
+          lua5.4 tests/check_lua_syntax.lua neovim/lazy-example.lua

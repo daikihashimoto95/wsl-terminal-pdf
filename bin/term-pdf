@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Open a SyncTeX-enabled tdf in a separate Windows Terminal WSL pane.
+
+Only this launcher needs Python; it uses the standard library. The viewer and
+Neovim both run inside the same WSL distribution. No shell interprets paths.
+"""
+
+import argparse
+import base64
+import json
+import math
+import os
+from pathlib import Path
+import re
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+
+
+class LaunchError(Exception):
+    pass
+
+
+def absolute(value):
+    return str(Path(value).expanduser().resolve())
+
+
+def clean_text(value, label):
+    if not isinstance(value, str) or not value or any(c in value for c in "\x00\r\n"):
+        raise LaunchError(f"{label} must be nonempty and cannot contain NUL or newlines")
+    return value
+
+
+def normalize_request(options, need_editor=True):
+    """Validate before any process starts or any IPC command is sent."""
+    for name in ("pdf", "socket"):
+        value = getattr(options, name, None)
+        if not value:
+            raise LaunchError(f"--{name} is required")
+        setattr(options, name, absolute(clean_text(value, f"--{name}")))
+    if not Path(options.pdf).is_file():
+        raise LaunchError(f"PDF does not exist: {options.pdf}; compile it first")
+    if need_editor:
+        if not getattr(options, "server", None):
+            raise LaunchError("--server is required (Neovim :echo v:servername)")
+        options.server = absolute(clean_text(options.server, "--server"))
+    options.cwd = absolute(getattr(options, "cwd", None) or os.getcwd())
+    if not Path(options.cwd).is_dir():
+        raise LaunchError(f"Working directory does not exist: {options.cwd}")
+    options.timeout = getattr(options, "timeout", 2.0)
+    if not math.isfinite(options.timeout) or options.timeout <= 0:
+        raise LaunchError("--timeout must be a finite positive number")
+
+    line, column, tex = (getattr(options, key, None) for key in ("line", "column", "tex"))
+    if line is None and tex is None and column is None:
+        return options
+    if line is None or tex is None:
+        raise LaunchError("Forward search requires both --line and --tex")
+    if line < 1 or line > 2**31 - 1:
+        raise LaunchError("--line must be between 1 and 2147483647")
+    column = 0 if column is None else column
+    if column < 0 or column > 2**31 - 1:
+        raise LaunchError("--column must be between 0 and 2147483647")
+    options.column = column
+    options.tex = absolute(clean_text(tex, "--tex"))
+    return options
+
+
+def forward_message(options):
+    if options.line is None or options.tex is None:
+        raise LaunchError("Forward search requires --line and --tex")
+    # This is tdf/src/ipc.rs's wire format. splitn(3, ':') preserves path colons.
+    return f"{options.line}:{options.column}:{options.tex}\n".encode("utf-8")
+
+
+def send_forward(options):
+    if not Path(options.socket).exists():
+        raise LaunchError("PDF viewer is not running; use :TermPdfOpen first")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(options.timeout)
+            client.connect(options.socket)
+            client.sendall(forward_message(options))
+    except (socket.timeout, TimeoutError) as exc:
+        raise LaunchError(f"Forward search timed out after {options.timeout:g}s") from exc
+    except (FileNotFoundError, ConnectionRefusedError) as exc:
+        raise LaunchError("PDF viewer is not running; use :TermPdfOpen first") from exc
+    except OSError as exc:
+        raise LaunchError(f"Cannot contact PDF viewer: {exc}") from exc
+
+
+def viewer_is_running(options):
+    if not Path(options.socket).exists():
+        return False
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(options.timeout)
+            client.connect(options.socket)
+        return True
+    except OSError:
+        return False
+
+
+def viewer_path(options):
+    value = getattr(options, "viewer", None)
+    if not value or not Path(value).is_absolute():
+        raise LaunchError("Use --viewer with the absolute path to the patched tdf executable")
+    value = absolute(clean_text(value, "--viewer"))
+    if not Path(value).is_file() or not os.access(value, os.X_OK):
+        raise LaunchError(f"Viewer is missing or not executable: {value}")
+    return value
+
+
+def terminal_path(options):
+    configured = getattr(options, "wt_path", None)
+    value = configured or shutil.which("wt.exe")
+    if not value and not configured:
+        powershell = shutil.which("powershell.exe")
+        if powershell:
+            return (absolute(powershell), "powershell")
+    if not value:
+        raise LaunchError(
+            "wt.exe is not executable from WSL. Set wt_path in the Neovim plugin "
+            "or pass --wt-path /mnt/c/path/to/wt.exe. Windows App Execution "
+            "Aliases can require Windows PowerShell; enable WSL Windows interop "
+            "and make powershell.exe available if the wt.exe alias cannot run directly."
+        )
+    value = absolute(clean_text(value, "--wt-path"))
+    # WSL cannot execute the usual WindowsApps app-execution alias directly.
+    # A short-lived PowerShell process can resolve it on the Windows side.
+    if not configured and "/Microsoft/WindowsApps/" in value:
+        powershell = shutil.which("powershell.exe")
+        if powershell:
+            return (absolute(powershell), "powershell")
+    if not Path(value).is_file() or not os.access(value, os.X_OK):
+        raise LaunchError(f"Windows Terminal executable is missing or not executable: {value}")
+    return (value, "native")
+
+
+def powershell_argv(executable, arguments):
+    # Both strings interpolated into this fixed script are base64 data, never
+    # executable user text. Decoding yields an argv array for native invocation.
+    encoded_args = base64.b64encode(json.dumps(arguments).encode("utf-8")).decode("ascii")
+    program = (
+        "$ErrorActionPreference='Stop'; "
+        "try { "
+        "$a=@(ConvertFrom-Json ([Text.Encoding]::UTF8.GetString("
+        f"[Convert]::FromBase64String('{encoded_args}')))); "
+        "$exe=$a[0]; $nativeArgs=@($a | Select-Object -Skip 1); "
+        "& $exe @nativeArgs; "
+        "if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }; exit 0 "
+        "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+    )
+    encoded_program = base64.b64encode(program.encode("utf-16-le")).decode("ascii")
+    return [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded_program]
+
+
+def open_pane(options):
+    options = normalize_request(options)
+    if viewer_is_running(options):
+        if options.line is not None:
+            send_forward(options)
+        else:
+            print("PDF viewer is already running")
+        return 0
+    options.viewer = viewer_path(options)
+    terminal, terminal_mode = terminal_path(options)
+    distro = clean_text(os.environ.get("WSL_DISTRO_NAME", ""), "WSL_DISTRO_NAME")
+    if not re.fullmatch(r"[A-Za-z0-9_. -]+", distro):
+        raise LaunchError("WSL_DISTRO_NAME contains unsupported characters")
+    if not math.isfinite(options.size) or not 0 < options.size < 1:
+        raise LaunchError("--size must be between 0 and 1")
+    window = clean_text(str(options.window), "--window")
+    if not re.fullmatch(r"[A-Za-z0-9_. -]+", window):
+        raise LaunchError("--window must be a number or a name using letters, digits, spaces, . _ -")
+    launcher = str(Path(__file__).resolve())
+    if any(c in launcher for c in ";\r\n\x00"):
+        raise LaunchError("Move terminal-pdf-kit to a directory without semicolons or newlines")
+
+    # WT treats semicolons as command separators even when no shell is involved.
+    # A private ASCII-named request file keeps PDF/source/editor paths entirely
+    # out of WT's command parser. The child deletes it after reading.
+    request = {
+        key: getattr(options, key, None)
+        for key in ("pdf", "server", "socket", "line", "column", "tex", "cwd", "viewer", "timeout")
+    }
+    fd, request_path = tempfile.mkstemp(prefix="term-pdf-", suffix=".json", dir="/tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(request, handle, ensure_ascii=False)
+        terminal_args = [
+            terminal if terminal_mode == "native" else "wt.exe",
+            "-w", window, "split-pane", "-V", "-s", str(options.size),
+            "wsl.exe", "--distribution", distro, "--exec", "/usr/bin/python3", launcher,
+            "view", "--request", request_path,
+        ]
+        argv = terminal_args if terminal_mode == "native" else powershell_argv(terminal, terminal_args)
+        result = subprocess.run(argv, check=False, timeout=options.timeout + 8)
+        if result.returncode:
+            raise LaunchError(f"Windows Terminal failed with exit code {result.returncode}")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        Path(request_path).unlink(missing_ok=True)
+        raise LaunchError(f"Cannot open Windows Terminal pane: {exc}") from exc
+    except BaseException:
+        Path(request_path).unlink(missing_ok=True)
+        raise
+    return 0
+
+
+def load_request(options):
+    if not getattr(options, "request", None):
+        return options
+    path = Path(options.request)
+    if not path.is_absolute() or path.parent != Path("/tmp") or not re.fullmatch(
+        r"term-pdf-[A-Za-z0-9_-]+\.json", path.name
+    ):
+        raise LaunchError("Invalid pane request path")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise LaunchError("Pane request must be a private regular file owned by this user")
+            request = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise LaunchError(f"Cannot read pane request: {exc}") from exc
+    finally:
+        path.unlink(missing_ok=True)
+    if not isinstance(request, dict):
+        raise LaunchError("Invalid pane request")
+    allowed = {"pdf", "server", "socket", "line", "column", "tex", "cwd", "viewer", "timeout"}
+    if set(request) - allowed:
+        raise LaunchError("Unknown pane request fields")
+    for key, value in request.items():
+        setattr(options, key, value)
+    return options
+
+
+def view_pdf(options):
+    options = normalize_request(load_request(options))
+    viewer = viewer_path(options)
+    if not Path(options.server).exists():
+        raise LaunchError("Neovim socket no longer exists; open the preview from the running editor")
+    env = os.environ.copy()
+    local_bin = str(Path.home() / ".local" / "bin")
+    env["PATH"] = local_bin + os.pathsep + env.get("PATH", os.defpath)
+    env.pop("NVIM", None)
+    env["NVIM_LISTEN_ADDRESS"] = options.server
+    env["TDF_SOCKET_PATH"] = options.socket
+    argv = [viewer, "--prerender", "2", "--max-wide", "1", "--reload-delay", "150"]
+    if options.line is not None:
+        argv += ["--synctex-forward", f"{options.line}:{options.column}:{options.tex}"]
+    argv.append(options.pdf)
+    try:
+        result = subprocess.run(argv, env=env, cwd=options.cwd, check=False)
+    except OSError as exc:
+        raise LaunchError(f"Cannot start PDF viewer: {exc}") from exc
+    if result.returncode:
+        raise LaunchError(f"PDF viewer failed with exit code {result.returncode}")
+    return 0
+
+
+def doctor(options):
+    checks = [
+        ("WSL distribution", os.environ.get("WSL_DISTRO_NAME")),
+        ("Windows Terminal / Windows PowerShell", options.wt_path or shutil.which("wt.exe") or shutil.which("powershell.exe")),
+        ("tdf", options.viewer or shutil.which("tdf")),
+        ("nvr (inverse search)", shutil.which("nvr")),
+        ("synctex", shutil.which("synctex")),
+    ]
+    for label, value in checks:
+        print(f"{label}: {value or 'NOT FOUND'}")
+    viewer = options.viewer or shutil.which("tdf")
+    synctex_flags = False
+    if viewer:
+        try:
+            result = subprocess.run([viewer, "--help"], capture_output=True, text=True, check=False, timeout=3)
+            synctex_flags = "--synctex-forward" in result.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    print(f"tdf SyncTeX CLI: {'found' if synctex_flags else 'NOT FOUND'}")
+    print("SyncTeX flags alone do not prove that the patched viewer was built with the synctex feature.")
+    print("SIXEL display and Windows Terminal pane launch require a check on your Windows/WSL machine.")
+    return 0 if all(value for _, value in checks) and synctex_flags else 1
+
+
+def parser():
+    p = argparse.ArgumentParser(description=__doc__)
+    commands = p.add_subparsers(dest="command", required=True)
+    for name in ("open", "view", "forward"):
+        command = commands.add_parser(name)
+        command.add_argument("--pdf")
+        command.add_argument("--server")
+        command.add_argument("--socket")
+        command.add_argument("--line", type=int)
+        command.add_argument("--column", type=int)
+        command.add_argument("--tex")
+        command.add_argument("--cwd")
+        command.add_argument("--timeout", type=float, default=2.0)
+        if name != "forward":
+            command.add_argument("--viewer")
+        if name == "open":
+            command.add_argument("--window", default="0")
+            command.add_argument("--size", type=float, default=0.45)
+            command.add_argument("--wt-path")
+        if name == "view":
+            command.add_argument("--request", help=argparse.SUPPRESS)
+    command = commands.add_parser("doctor")
+    command.add_argument("--wt-path")
+    command.add_argument("--viewer")
+    return p
+
+
+def main(argv=None):
+    options = parser().parse_args(argv)
+    try:
+        if options.command == "open":
+            return open_pane(options)
+        if options.command == "view":
+            return view_pdf(options)
+        if options.command == "forward":
+            send_forward(normalize_request(options, need_editor=False))
+            return 0
+        return doctor(options)
+    except LaunchError as exc:
+        print(f"term-pdf: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

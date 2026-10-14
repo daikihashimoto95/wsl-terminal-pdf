@@ -1,0 +1,19 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local packages and build output
+*.zip
+target/
+build/
+dist/
+
+# Editor and operating-system files
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

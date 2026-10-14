@@ -1,0 +1,14 @@
+diff --git a/src/ipc.rs b/src/ipc.rs
+--- a/src/ipc.rs
++++ b/src/ipc.rs
+@@ -10,6 +10,10 @@ use tokio::{
+ /// Derive a socket path from the PDF filename.
+ #[must_use]
+ pub fn socket_path(pdf_path: &Path) -> PathBuf {
++	if let Some(path) = std::env::var_os("TDF_SOCKET_PATH").filter(|path| !path.is_empty()) {
++		return PathBuf::from(path);
++	}
++
+ 	let stem = pdf_path
+ 		.file_stem()
+ 		.and_then(|s| s.to_str())
