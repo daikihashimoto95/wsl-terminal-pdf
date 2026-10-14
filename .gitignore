@@ -10,6 +10,10 @@ venv/
 target/
 build/
 dist/
+.ci-viewer/
+.ci-target/
+.ci-python/
+.ci-viewer-linkage.txt
 
 # Editor and operating-system files
 *.swp

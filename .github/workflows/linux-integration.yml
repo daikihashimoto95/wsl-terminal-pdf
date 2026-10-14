@@ -1,0 +1,66 @@
+name: Linux integration
+
+on:
+  push:
+    paths:
+      - '.github/workflows/linux-integration.yml'
+      - 'scripts/build-viewer.sh'
+      - 'patches/**'
+      - 'tests/smoke_linux.py'
+      - 'bin/term-pdf'
+      - 'neovim/lua/**'
+  pull_request:
+    paths:
+      - '.github/workflows/linux-integration.yml'
+      - 'scripts/build-viewer.sh'
+      - 'patches/**'
+      - 'tests/smoke_linux.py'
+      - 'bin/term-pdf'
+      - 'neovim/lua/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  viewer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      TDF_INSTALL_ROOT: ${{ github.workspace }}/.ci-viewer
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.ci-target
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native and integration dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes build-essential git clang libclang-dev pkg-config libfontconfig1-dev libsynctex-dev texlive-luatex texlive-latex-base poppler-utils python3-venv
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly --profile minimal
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .ci-target
+          key: ${{ runner.os }}-tdf-91709652-nightly-v1
+      - name: Build the actual patched viewer
+        run: bash scripts/build-viewer.sh
+      - name: Check viewer binary and linkage
+        run: |
+          "$TDF_INSTALL_ROOT/bin/tdf" --version
+          "$TDF_INSTALL_ROOT/bin/tdf" --help | grep -- --synctex-forward
+          ldd "$TDF_INSTALL_ROOT/bin/tdf" > .ci-viewer-linkage.txt
+          cat .ci-viewer-linkage.txt
+          if grep -q 'not found' .ci-viewer-linkage.txt; then exit 1; fi
+      - name: Install fixed Neovim and nvr
+        run: |
+          curl --fail --location --output /tmp/nvim-linux-x86_64.tar.gz https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-x86_64.tar.gz
+          echo 'b2f91117be5b5ea39edd7297156dc2a4a8df4add6c95a90809a8df19e7ab6f52  /tmp/nvim-linux-x86_64.tar.gz' | sha256sum --check
+          tar -xzf /tmp/nvim-linux-x86_64.tar.gz -C /tmp
+          echo '/tmp/nvim-linux-x86_64/bin' >> "$GITHUB_PATH"
+          python3 -m venv .ci-python
+          .ci-python/bin/pip install neovim-remote
+          echo "$GITHUB_WORKSPACE/.ci-python/bin" >> "$GITHUB_PATH"
+      - name: Exercise real TeX, Neovim, viewer, and SyncTeX
+        run: timeout 120s .ci-python/bin/python tests/smoke_linux.py --viewer "$TDF_INSTALL_ROOT/bin/tdf"
