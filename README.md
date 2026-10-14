@@ -150,7 +150,9 @@ img2sixel /path/to/a-small-image.png
 
 `Checks` workflow では Python テスト 15 件、shell 構文、Lua 構文が通過しています。実際の Unix socket を使う 2 件も GitHub の Ubuntu runner で実行しています。
 
-追加した `Linux integration` workflow は Ubuntu 24.04 で実際の patched tdf をビルドし、Neovim 0.11.5・LuaLaTeX・nvr と接続します。ビューアの実ビルド・CLI 起動・共有ライブラリ解決は確認済みです。全プロセスを使う往復検索の結果は確認中です。
+`Linux integration` workflow は Ubuntu 24.04 で実際の patched tdf をビルドし、Neovim 0.11.5・LuaLaTeX・nvr と接続します。2026-10-14 の [実行結果](https://github.com/daikihashimoto95/wsl-terminal-pdf/actions/runs/38550666469) で、ビューアの実ビルド・CLI 起動・共有ライブラリ解決・SIXEL 出力・全プロセスを使う SyncTeX 往復検索・正常終了がすべて通過しています。テスト原稿では PDF の 2 ページ目へ移動し、逆方向検索で子ファイルの 5 行目へ戻りました。
+
+この検証で、描画領域のセル数と画像サイズの丸め方の不一致により、処理が完了しても SIXEL が表示されないケースを確認しました。`tdf-image-fit.patch` による修正後、同じ原稿と疑似端末で SIXEL 出力を確認しています。使用した Rust は `1.101.0-nightly`（2026-10-13）、Neovim は `0.11.5`、neovim-remote は `2.5.1` です。
 
 この workflow の検証対象は次のとおりです。
 
