@@ -14,10 +14,20 @@ separate socket to each project and Neovim instance. This kit forwards commands
 using the upstream Unix-socket wire format directly. The upstream
 `--synctex-socket` CLI option also remains available.
 
+`tdf-image-fit.patch` bounds the generic image protocol to the terminal area
+allocated by tdf. Upstream computes the allocation by truncating pixel/cell
+ratios, while ratatui-image's `Resize::None` retains the image and rounds its
+cell dimensions up. For example, a 101-pixel image with 8-pixel cells can have
+a 12-cell allocation and a 13-cell protocol area. The SIXEL renderer rejects
+an image larger than its allocation, producing no image output. Changing the
+conversion to `Resize::Fit(None)` uses ratatui-image's normal fit operation
+to keep the protocol within the allocation. This correction does not select
+or force a graphics protocol; terminal capability detection still runs.
+
 The build script checks the pin and patch applicability, initializes recursive
 Git submodules, and installs with `cargo install --locked --features synctex
 --bin tdf`. Cargo.lock pins dependency versions; upstream's nightly toolchain
-channel is not pinned to a date. The script copies this patch and upstream
+channel is not pinned to a date. The script copies both patches and upstream
 commit record next to the installed viewer.
 
 The upstream `s` key performs inverse search at the **center of the full PDF

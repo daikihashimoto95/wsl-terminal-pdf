@@ -100,6 +100,10 @@ class SixelTerminal:
         self.sixels = 0
         self.probes = 0
         self.raw_tail = bytearray()
+        self.raw_prefix = bytearray()
+        self.dcs_starts = 0
+        self.c1_dcs_starts = 0
+        self.previous_byte = None
         self.error = None
         self.lock = threading.Lock()
         self.stop = threading.Event()
@@ -131,6 +135,13 @@ class SixelTerminal:
                     with self.lock:
                         self.raw_tail.extend(chunk)
                         del self.raw_tail[:-12000]
+                        self.raw_prefix.extend(chunk[:max(0, 2000 - len(self.raw_prefix))])
+                        for byte in chunk:
+                            if self.previous_byte == 27 and byte == ord("P"):
+                                self.dcs_starts += 1
+                            if byte == 0x90:
+                                self.c1_dcs_starts += 1
+                            self.previous_byte = byte
                         self.feed(chunk)
         except Exception as exc:
             with self.lock:
@@ -342,6 +353,7 @@ def smoke(options):
             env.pop("TERM_PROGRAM", None)
             env.pop("TMUX", None)
             env["NVIM"] = str(root / "wrong-editor.sock")
+            env["RUST_LOG"] = "debug"
             terminal = SixelTerminal(master)
             try:
                 preview = subprocess.Popen(
@@ -390,9 +402,15 @@ def smoke(options):
         except Exception:
             if terminal is not None:
                 frames, screen, error = terminal.snapshot()
-                print(f"Terminal diagnostics: completed SIXEL frames={frames}, reader_error={error}\n{screen}", file=sys.stderr)
+                print(f"Terminal diagnostics: completed SIXEL frames={frames}, probes={terminal.probes}, "
+                      f"DCS starts={terminal.dcs_starts}, C1 DCS bytes={terminal.c1_dcs_starts}, "
+                      f"reader_error={error}\n{screen}", file=sys.stderr)
                 with terminal.lock:
+                    print(f"First terminal bytes: {bytes(terminal.raw_prefix)!r}", file=sys.stderr)
                     print(f"Last terminal bytes: {bytes(terminal.raw_tail[-1500:])!r}", file=sys.stderr)
+            for debug_log in project.glob("debug*.log"):
+                print(f"Viewer diagnostics ({debug_log.name}):\n"
+                      + debug_log.read_text(errors="replace")[-6000:], file=sys.stderr)
             if nvim_log.exists():
                 print("Neovim diagnostics:\n" + nvim_log.read_text(errors="replace")[-4000:], file=sys.stderr)
             raise

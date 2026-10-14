@@ -1,0 +1,12 @@
+diff --git a/src/converter.rs b/src/converter.rs
+--- a/src/converter.rs
++++ b/src/converter.rs
+@@ -213,7 +213,7 @@
+ 				let cell_h = page_info.img_data.cell_h;
+ 				ConvertedImage::Generic {
+ 					protocol: picker
+-						.new_protocol(dyn_img, img_area, Resize::None)
++						.new_protocol(dyn_img, img_area, Resize::Fit(None))
+ 						.map_err(|e| {
+ 							RenderError::Converting(format!(
+ 								"Couldn't convert DynamicImage to ratatui image: {e}"

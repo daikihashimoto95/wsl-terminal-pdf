@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the pinned AGPL-3.0-only tdf fork with this kit's socket-path patch.
+# Build the pinned AGPL-3.0-only tdf fork with this kit's integration patches.
 # Source: https://github.com/yebo-liu/tdf
 # Pin: 91709652c18ed027dcb671200e8bf2dc7211dc2a
 set -euo pipefail
@@ -38,8 +38,10 @@ if [[ "$(git -C "$tdf_source_dir" rev-parse HEAD)" != "$tdf_commit" ]]; then
     exit 1
 fi
 
-git -C "$tdf_source_dir" apply --check "$tdf_script_dir/../patches/tdf-socket-env.patch"
-git -C "$tdf_source_dir" apply "$tdf_script_dir/../patches/tdf-socket-env.patch"
+for tdf_patch in "$tdf_script_dir"/../patches/tdf-*.patch; do
+    git -C "$tdf_source_dir" apply --check "$tdf_patch"
+    git -C "$tdf_source_dir" apply "$tdf_patch"
+done
 
 # Run inside the checkout so its rust-toolchain.toml selects nightly.
 cd -- "$tdf_source_dir"
@@ -47,6 +49,6 @@ cargo install --path . --locked --features synctex --bin tdf --root "$tdf_instal
 
 # Keep the small provenance records next to the installed binary.
 mkdir -p -- "$tdf_install_root/share/terminal-pdf"
-cp -- "$tdf_script_dir/../patches/tdf-socket-env.patch" "$tdf_install_root/share/terminal-pdf/"
+cp -- "$tdf_script_dir"/../patches/tdf-*.patch "$tdf_install_root/share/terminal-pdf/"
 printf '%s\n' "Upstream: $tdf_repo_url" "Commit: $tdf_commit" 'License: AGPL-3.0-only' > "$tdf_install_root/share/terminal-pdf/UPSTREAM.txt"
 printf 'Installed: %s/bin/tdf\n' "$tdf_install_root"

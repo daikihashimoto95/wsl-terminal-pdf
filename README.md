@@ -4,7 +4,7 @@ Windows Terminal / WSL2 / Neovim 用の PDF プレビュー連携キット（試
 
 Windows Terminal の同じタブを左右に分け、左に Neovim、右に SIXEL 対応 PDF ビューアを置くための設定一式です。Neovim の `:TermPdfOpen` で右ペインを開き、`:TermPdfForward` でカーソル位置から PDF にジャンプします。
 
-PDF の描画には [yebo-liu/tdf](https://github.com/yebo-liu/tdf) を使います。このキットは新しい PDF 描画エンジンを実装するものではありません。小さな Lua 設定、標準ライブラリだけを使う Python 起動スクリプト、接続先ソケットを指定する tdf の 4 行の変更を提供します。tdf 本体のソースや実行ファイルはこのリポジトリに含めません。
+PDF の描画には [yebo-liu/tdf](https://github.com/yebo-liu/tdf) を使います。このキットは新しい PDF 描画エンジンを実装するものではありません。小さな Lua 設定、標準ライブラリだけを使う Python 起動スクリプト、tdf の接続先ソケット指定と描画サイズの修正を提供します。tdf 本体のソースや実行ファイルはこのリポジトリに含めません。
 
 ## できることと現在の制限
 
@@ -58,7 +58,7 @@ bash scripts/build-viewer.sh
 bash scripts/install-integration.sh
 ```
 
-ビルドスクリプトは upstream commit `91709652c18ed027dcb671200e8bf2dc7211dc2a` に固定し、`patches/tdf-socket-env.patch` を適用して `--features synctex` 付きでビルドします。
+ビルドスクリプトは upstream commit `91709652c18ed027dcb671200e8bf2dc7211dc2a` に固定し、`patches/tdf-socket-env.patch` と `patches/tdf-image-fit.patch` を適用して `--features synctex` 付きでビルドします。
 
 以下が作られます。
 
@@ -148,11 +148,21 @@ img2sixel /path/to/a-small-image.png
 
 ## 検証範囲
 
-この環境で確認したのは Python 起動処理のテスト、Lua 構文、shell 構文、固定 upstream に対する patch 適用です。Windows Terminal / WSL2 / Neovim を組み合わせた実機動作、実際の SIXEL 描画、TeX をコンパイルしての往復検索、Rust ビルド完了は未検証です。
+`Checks` workflow では Python テスト 15 件、shell 構文、Lua 構文が通過しています。実際の Unix socket を使う 2 件も GitHub の Ubuntu runner で実行しています。
 
-実際の Unix socket を作る 2 件のテストは、この実行環境で socket 作成が拒否されるためスキップしています。IPC の送信内容とエラー処理はモックを使って検証しています。
+追加した `Linux integration` workflow は Ubuntu 24.04 で実際の patched tdf をビルドし、Neovim 0.11.5・LuaLaTeX・nvr と接続します。ビューアの実ビルド・CLI 起動・共有ライブラリ解決は確認済みです。全プロセスを使う往復検索の結果は確認中です。
 
-テストは標準ライブラリだけで実行できます。
+この workflow の検証対象は次のとおりです。
+
+- 子ファイル・root directive・別の PDF 出力ディレクトリ・空白と日本語を含むパスを使う実際の TeX コンパイル。
+- 実際の Neovim に Lua モジュールを読み込み、`:TermPdfForward` から tdf の Unix socket を経由して PDF の 2 ページ目へ移動。
+- 実際の tdf を疑似端末で動かし、SIXEL の問い合わせ応答と描画データの出力を確認。
+- tdf へ `s` を送り、実際の nvr と Neovim RPC で、`synctex edit` と同じソース・行へ戻ることを確認。
+- `q` でビューアと起動スクリプトが正常終了することを確認。
+
+疑似端末は画像のデータを受け取りますが、ラスタ画像を表示・復号しません。Windows Terminal の表示品質、WSL と Windows の相互運用、ペイン分割、サイズ変更、自動再読込、操作遅延・メモリ使用量は、この検証には含めていません。
+
+起動処理のテストは標準ライブラリだけで実行できます。
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -160,7 +170,16 @@ bash -n scripts/build-viewer.sh
 bash -n scripts/install-integration.sh
 ```
 
-GitHub Actions は Ubuntu で Python テスト、shell 構文、Lua 構文を確認します。ビューアの Rust ビルドや Windows / WSL 実機の検証は含みません。
+実プロセスを使う Linux / WSL の追加検証には、LuaLaTeX・synctex・Neovim 0.10 以降・ビルド済みビューアが必要です。テスト用の Python 環境を作って実行します。
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install neovim-remote
+PATH="$PWD/.venv/bin:$PATH" .venv/bin/python tests/smoke_linux.py \
+  --viewer "$HOME/.local/share/terminal-pdf/viewer/bin/tdf"
+```
+
+これは Windows Terminal ペインの起動テストではありません。詳細な検証結果は [Linux integration](https://github.com/daikihashimoto95/wsl-terminal-pdf/actions/workflows/linux-integration.yml) の実行ログで確認できます。
 
 実機では同じ原稿について、起動 → 順方向検索 → ページ中央から逆方向検索 → 再コンパイルによる更新 → ウィンドウサイズ変更を確認してください。クリック逆方向検索や実測済みの軽量性を提供する完成版ではなく、上記制限付きの連携試作です。
 

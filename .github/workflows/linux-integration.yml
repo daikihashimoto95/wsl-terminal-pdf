@@ -37,7 +37,8 @@ jobs:
           sudo apt-get install --no-install-recommends --yes build-essential git clang libclang-dev pkg-config libfontconfig1-dev libsynctex-dev texlive-luatex texlive-latex-base poppler-utils python3-venv
       - name: Install Rust nightly
         run: rustup toolchain install nightly --profile minimal
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: viewer-cache
         with:
           path: |
             ~/.cargo/registry
@@ -64,3 +65,12 @@ jobs:
           echo "$GITHUB_WORKSPACE/.ci-python/bin" >> "$GITHUB_PATH"
       - name: Exercise real TeX, Neovim, viewer, and SyncTeX
         run: timeout 120s .ci-python/bin/python tests/smoke_linux.py --viewer "$TDF_INSTALL_ROOT/bin/tdf"
+      - name: Save compiler cache even when the integration test fails
+        if: always() && steps.viewer-cache.outputs.cache-primary-key != '' && steps.viewer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .ci-target
+          key: ${{ steps.viewer-cache.outputs.cache-primary-key }}
